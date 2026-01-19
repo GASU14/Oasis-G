@@ -1,0 +1,121 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // --- HELPER FUNCTIONS ---
+    
+    function isAuth() {
+      return request.auth != null;
+    }
+
+    // Check if user is operating on their own document
+    function isSelf(userId) {
+      return isAuth() && request.auth.uid == userId;
+    }
+    
+    // Safely get the requesting user's role from Firestore
+    function getRequestingUserRole() {
+       return exists(/databases/$(database)/documents/users/$(request.auth.uid)) 
+              ? get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role 
+              : "Guest";
+    }
+    
+    // Role Checks
+    function isRoleOwner() {
+      return isAuth() && getRequestingUserRole() == 'Owner';
+    }
+
+    function isRoleDev() {
+      return isAuth() && getRequestingUserRole() == 'Developer';
+    }
+    
+    // Combined Permissions
+    function isDevOrOwner() {
+      return isRoleOwner() || isRoleDev();
+    }
+
+    // --- COLLECTIONS ---
+
+    // 1. USERS COLLECTION
+    match /users/{userId} {
+      allow read: if true; 
+      
+      // CREATION: 
+      // User can create their own doc, BUT the role MUST be 'Member' or 'Guest'.
+      allow create: if isSelf(userId) 
+                    && (request.resource.data.role == "Member" || request.resource.data.role == "Guest");
+      
+      // UPDATE:
+      // 1. Owner can do anything.
+      // 2. Developer can update, BUT cannot touch 'Owner' accounts, and cannot write 'Owner' role.
+      // 3. Self can update, BUT role MUST NOT CHANGE.
+      allow update: if isRoleOwner() 
+                    || (isRoleDev() && resource.data.role != 'Owner' && request.resource.data.role != 'Owner')
+                    || (isSelf(userId) && request.resource.data.role == resource.data.role);
+                    
+      // DELETE:
+      allow delete: if isRoleOwner() || isSelf(userId);
+    }
+
+    // 2. LIBRARY DATA
+    match /games/{gameId} {
+      allow read: if true;
+      allow write: if isDevOrOwner();
+    }
+    
+    match /groups/{groupId} {
+      allow read: if true;
+      allow write: if isDevOrOwner();
+    }
+
+    // 3. SYSTEM METADATA
+    match /system/{docId} {
+      allow read: if true;
+      allow write: if isDevOrOwner();
+    }
+
+    // 4. COMMUNITY FEED
+    match /suggestions/{postId} {
+      allow read: if true;
+      allow create: if isAuth();
+      allow update, delete: if isAuth() && (request.auth.uid == resource.data.authorUid || isDevOrOwner());
+      
+      match /comments/{commentId} {
+        allow read: if true;
+        allow create: if isAuth();
+        allow update, delete: if isAuth() && (request.auth.uid == resource.data.authorUid || isDevOrOwner());
+      }
+    }
+    
+    match /bugs/{postId} {
+      allow read: if true;
+      allow create: if isAuth();
+      allow update, delete: if isAuth() && (request.auth.uid == resource.data.authorUid || isDevOrOwner());
+      
+      match /comments/{commentId} {
+        allow read: if true;
+        allow create: if isAuth();
+        allow update, delete: if isAuth() && (request.auth.uid == resource.data.authorUid || isDevOrOwner());
+      }
+    }
+
+    match /general_chat/{postId} {
+      allow read: if true;
+      // Allow creation only if Auth AND Not a Guest role
+      allow create: if isAuth() && getRequestingUserRole() != 'Guest';
+      allow update, delete: if isAuth() && (request.auth.uid == resource.data.authorUid || isDevOrOwner());
+      
+      match /comments/{commentId} {
+        allow read: if true;
+        allow create: if isAuth();
+        allow update, delete: if isAuth() && (request.auth.uid == resource.data.authorUid || isDevOrOwner());
+      }
+    }
+
+    // 5. ADMIN CHAT
+    match /admin_chat/{postId} {
+      allow read, write: if isDevOrOwner();
+    }
+  }
+}
